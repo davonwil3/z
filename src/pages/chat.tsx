@@ -163,7 +163,9 @@ export default function ChatPage() {
         import.meta.env.VITE_BACKEND_URL + "/api/create-thread",
         {
           method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+         
+          body: JSON.stringify({ title: "New Chat" }),
         }
       );
       const { threadID } = (await res.json()) as { threadID: string };
