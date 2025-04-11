@@ -16,6 +16,8 @@ import { useEffect, useState } from "react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { getIdToken } from "../App";
+import { marked } from "marked";
+import AiResponse from "../components/reusable/airesponse";
 
 // ---------- domain types ----------
 type Message = {
@@ -24,6 +26,7 @@ type Message = {
   isLoading?: boolean;
   followUpQuestions?: { question: string }[];
   citations?: string[];
+  structured?: any;
 };
 
 type Thread = { id: string; title: string };
@@ -118,40 +121,87 @@ export default function ChatPage() {
     return threadID;
   };
 
-  // ---------------- send message ----------------
   const handleSend = async (prompt?: string) => {
     const text = (prompt ?? newMessage).trim();
     if (!text) return;
-
-    // 1️⃣  immediately render the user’s own message
-    const userMsg: Message = { text, sender: "user" };
-    setMessages((m) => [...m, userMsg]);
+  
+    // 1️⃣ Optimistic user bubble
+    setMessages((m) => [...m, { text, sender: "user" }]);
     setNewMessage("");
-
+  
     try {
       const threadId = await ensureThread(text);
       const token = await getIdToken();
-
-      const res = await fetch(
-        import.meta.env.VITE_BACKEND_URL + "/api/send-message",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({ threadID: threadId, text }),
+  
+      // 2️⃣ Placeholder assistant bubble to stream into
+      let assistantText = "";
+      let structuredPayload: null = null;
+      setMessages((m) => [...m, { text: "", sender: "assistant" }]);
+  
+      const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/send-message`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ threadID: threadId, text }),
+      });
+  
+      if (!res.ok || !res.body) throw new Error("Stream request failed");
+  
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+  
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+  
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() || "";
+  
+        for (const part of parts) {
+          if (part.startsWith("event:data")) {
+            // This part should contain both the event and the data
+            const dataLine = part.split("\n").find((line) => line.startsWith("data: "));
+            if (dataLine) {
+              try {
+                const json = JSON.parse(dataLine.slice("data: ".length));
+                structuredPayload = json?.structured ?? null;
+                console.log("📊 Structured data received:", structuredPayload);
+              } catch (err) {
+                console.error("❌ Failed to parse structured data:", err);
+              }
+            }
+            continue;
+          }
+        
+          if (!part.startsWith("data: ")) continue;
+          const content = part.slice("data: ".length);
+        
+          if (content === "[DONE]") return;
+        
+          assistantText += content === "" ? "\n" : content;
+        
+          setMessages((m) => {
+            const updated = [...m];
+            updated[updated.length - 1] = {
+              text: marked.parse(assistantText) as string,
+              sender: "assistant",
+              structured: structuredPayload || undefined, // 🧠 Optional structured data
+            };
+            return updated;
+          });
         }
-      );
-      if (!res.ok) throw new Error("send failed");
-      const reply: Message = await res.json();
-
-      setMessages((m) => [...m, reply]);
+        
+      }
     } catch (err) {
-      console.error(err);
+      console.error("❌ Stream failed:", err);
     }
   };
-
+  
+  
   // ---------------- follow‑up ----------------
   const onFollowUp = (q: string) => handleSend(q);
 
@@ -164,7 +214,7 @@ export default function ChatPage() {
         {
           method: "POST",
           headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-         
+
           body: JSON.stringify({ title: "New Chat" }),
         }
       );
@@ -421,7 +471,11 @@ export default function ChatPage() {
                   m.sender === "user" ? (
                     <UserBubble key={i} text={m.text} />
                   ) : (
-                    <AiBubble key={i} msg={m} onFollowUp={onFollowUp} />
+                    < AiResponse 
+                      key={i}
+                      msg={m}
+                      onFollowUp={onFollowUp}
+                    />
                   )
                 )}
               </div>
@@ -485,37 +539,43 @@ function AiBubble({
 }) {
   return (
     <div className="flex items-start gap-3">
-      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[#238636]">
-        <Brain className="h-5 w-5 text-white" />
-      </div>
-      <div className="flex-1 space-y-4 rounded-lg border border-[#30363d] bg-[#161b22] p-4">
-        <p className="text-sm">{msg.text}</p>
-        {msg.isLoading && <span className="text-xs italic">Loading…</span>}
+  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[#238636]">
+    <Brain className="h-5 w-5 text-white" />
+  </div>
+  <div className="flex-1 space-y-4 rounded-lg border border-[#30363d] bg-[#161b22] p-4">
+    <div
+      className=""
+      style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}
+      dangerouslySetInnerHTML={{ __html: msg.text }}
+    />
+    
+    {msg.isLoading && <span className="text-xs italic">Loading…</span>}
 
-        {msg.followUpQuestions && (
-          <div className="flex flex-wrap gap-2">
-            {msg.followUpQuestions.map((f, i) => (
-              <button
-                key={i}
-                onClick={() => onFollowUp(f.question)}
-                className="rounded bg-[#30363d] px-2 py-1 text-xs text-[#e6edf3]"
-              >
-                {f.question}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {msg.citations && (
-          <div className="space-y-1">
-            {msg.citations.map((c, i) => (
-              <div key={i} className="text-xs text-[#8b949e]">
-                {c}
-              </div>
-            ))}
-          </div>
-        )}
+    {msg.followUpQuestions && (
+      <div className="flex flex-wrap gap-2">
+        {msg.followUpQuestions.map((f, i) => (
+          <button
+            key={i}
+            onClick={() => onFollowUp(f.question)}
+            className="rounded bg-[#30363d] px-2 py-1 text-xs text-[#e6edf3]"
+          >
+            {f.question}
+          </button>
+        ))}
       </div>
-    </div>
+    )}
+
+    {msg.citations && (
+      <div className="space-y-1">
+        {msg.citations.map((c, i) => (
+          <div key={i} className="text-xs text-[#8b949e]">
+            {c}
+          </div>
+        ))}
+      </div>
+    )}
+  </div>
+</div>
+
   );
 }
